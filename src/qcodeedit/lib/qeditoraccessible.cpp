@@ -300,22 +300,16 @@ QRect QEditorAccessible::characterRect(int offset) const
     if (!docRect.isValid())
         return QRect();
 
-    // Use the editor's cursor-to-screen conversion: approximate by using the
-    // line rect translated by the horizontal scroll offset.
     const QDocumentLine docLine = ed->document()->line(line);
     const QPointF charPos = docLine.cursorToDocumentOffset(col);
 
-    qreal panelLeft = 0, panelTop = 0, temp = 0;
-    ed->getPanelMargins(&panelLeft, &panelTop, &temp, &temp);
-
-    const qreal x = panelLeft + charPos.x() - ed->horizontalScrollBar()->value();
-    const qreal y = panelTop  + docRect.top() - ed->verticalScrollBar()->value() * ed->document()->getLineSpacing();
-
-    const QPoint globalOffset = ed->viewport()->mapToGlobal(QPoint(0, 0));
-    return QRect(globalOffset.x() + qRound(x),
-                 globalOffset.y() + qRound(y),
-                 1,
-                 qRound(ed->document()->getLineSpacing()));
+    // mapFromContents() turns document coordinates into viewport ones by subtracting the scroll
+    // offsets, and viewport()->mapToGlobal() takes it from there to the screen. The panel margins
+    // must not be added on top: setPanelMargins() feeds them to setViewportMargins(), so the
+    // viewport already begins after the panels and mapToGlobal() accounts for them.
+    const QPoint viewportPos = ed->mapFromContents(QPoint(qRound(charPos.x()), qRound(docRect.top())));
+    return QRect(ed->viewport()->mapToGlobal(viewportPos),
+                 QSize(1, qRound(ed->document()->getLineSpacing())));
 }
 
 int QEditorAccessible::offsetAtPoint(const QPoint &point) const
