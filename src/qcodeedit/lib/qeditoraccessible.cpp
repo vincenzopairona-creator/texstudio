@@ -275,7 +275,7 @@ void QEditorAccessible::setSelection(int selectionIndex, int startOffset, int en
     if (selectionIndex != 0)
         return;
     QEditor *ed = editor();
-    if (!ed)
+    if (!ed || !ed->document())
         return;
 
     int startLine = 0, startCol = 0, endLine = 0, endCol = 0;
@@ -290,7 +290,7 @@ void QEditorAccessible::setSelection(int selectionIndex, int startOffset, int en
 QRect QEditorAccessible::characterRect(int offset) const
 {
     QEditor *ed = editor();
-    if (!ed)
+    if (!ed || !ed->document())
         return QRect();
 
     int line = 0, col = 0;
