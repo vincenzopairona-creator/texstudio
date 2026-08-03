@@ -324,8 +324,11 @@ int QEditorAccessible::offsetAtPoint(const QPoint &point) const
     if (!ed)
         return -1;
 
+    // cursorForPosition() takes content coordinates, not viewport ones: mapToContents() adds the
+    // scroll offsets. Without it the result is only correct while the document is scrolled to the
+    // top left, and drifts by exactly the scrolled amount as soon as it is not.
     const QPoint viewportPoint = ed->viewport()->mapFromGlobal(point);
-    const QDocumentCursor c = ed->cursorForPosition(viewportPoint);
+    const QDocumentCursor c = ed->cursorForPosition(ed->mapToContents(viewportPoint));
     if (!c.isValid())
         return -1;
     return offsetFromLineColumn(c.lineNumber(), c.columnNumber());
