@@ -415,8 +415,11 @@ void QEditorAccessible::boundaryOffsets(const QString &text, int offset,
         QTextBoundaryFinder finder(QTextBoundaryFinder::Word, text);
         finder.setPosition(offset);
 
-        // Move to the start of the current word (or the preceding word boundary).
-        int start = finder.toPreviousBoundary();
+        // Start of the item containing offset. toPreviousBoundary() always moves strictly
+        // backwards, so when offset already sits on a boundary - the usual case when navigating
+        // word by word, where the cursor rests at the start of a word - it would return the start
+        // of the *previous* item instead.
+        int start = finder.isAtBoundary() ? offset : finder.toPreviousBoundary();
         if (start < 0)
             start = 0;
 
@@ -438,7 +441,8 @@ void QEditorAccessible::boundaryOffsets(const QString &text, int offset,
     case QAccessible::SentenceBoundary: {
         QTextBoundaryFinder finder(QTextBoundaryFinder::Sentence, text);
         finder.setPosition(offset);
-        int start = finder.toPreviousBoundary();
+        // same reasoning as for WordBoundary above
+        int start = finder.isAtBoundary() ? offset : finder.toPreviousBoundary();
         if (start < 0) start = 0;
         finder.setPosition(start);
         int end = finder.toNextBoundary();
