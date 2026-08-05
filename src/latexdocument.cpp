@@ -2649,14 +2649,31 @@ void LatexDocuments::removeDocs(QStringList removeIncludes)
 			}
 		}
 		if (dc && dc->isHidden()) {
-			QStringList toremove = dc->includedFiles();
-            dc->setMasterDocument(nullptr,false);
-			hiddenDocuments.removeAll(dc);
-			//qDebug()<<fname;
-			delete dc->getEditorView();
-			delete dc;
-			if (!toremove.isEmpty())
-				removeDocs(toremove);
+            // check if child documents are still open, if yes -> don't delete
+            QList<LatexDocument*>children=dc->getListOfDocs(nullptr,true);
+            bool childIsOpen=std::any_of(children.begin(),children.end(),[this](LatexDocument *child){
+                return !child->isHidden();
+            });
+            if(!childIsOpen){
+                QStringList toremove = dc->includedFiles();
+                dc->setMasterDocument(nullptr,false);
+                hiddenDocuments.removeAll(dc);
+                //qDebug()<<fname;
+                delete dc->getEditorView();
+                delete dc;
+                if (!toremove.isEmpty()){
+                    removeDocs(toremove);
+                }
+            }else{
+                // child is still open, don't delete dc, but remove it from parent
+                QSharedPointer<LatexParser> newLp = QSharedPointer<LatexParser>::create();
+                *newLp= LatexParser::getInstance();
+                std::for_each(children.begin(), children.end(), [newLp](LatexDocument *elem) {
+                    elem->setLtxCommands(newLp);
+                });
+                dc->setLtxCommands(newLp);
+                dc->setMasterDocument(nullptr,true);
+            }
 		}
 	}
 }
@@ -2709,6 +2726,13 @@ std::pair<bool,bool> LatexDocuments::addDocsToLoad(QStringList filenames, LatexD
                 docForUpdate=doc;
                 newPackagesFound|=!doc->usedPackages(true).isEmpty();
                 newUserCommandsFound|=!doc->userCommandList().isEmpty();
+            }else{
+                if(doc->getMasterDocument()!=parentDocument){
+                    // document is already loaded, but not as child of parentDocument
+                    // -> add as child and set master document
+                    doc->setMasterDocument(parentDocument,false);
+                    parentDocument->addChild(doc);
+                }
             }
         }
         if(docForUpdate){
