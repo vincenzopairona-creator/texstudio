@@ -30,13 +30,30 @@ public:
 	int ticket;
     int level; ///< command level (see tokens) in order to handle nested commands like \shortstack
 
+    // A path command inside a picture environment has to be terminated by ";". These track whether that
+    // ";" is still missing, so that the statement can be shaded until it is typed.
+    bool pictureStatementOpen = false; ///< a path command (\draw, \node, ...) was started and not closed yet.
+                                       ///< Part of operator==, so that the following lines are rechecked
+                                       ///< when it changes: they are shaded too
+    int pictureStatementLevel = 0; ///< command level of that path command, so that a ";" nested deeper
+                                   ///< (inside the text of a node, say) is not taken for the terminating one
+    /// Every line the statement spans so far, with the ticket each carried when it was collected. That the
+    /// ";" is missing only becomes apparent on a later line, so the shading has to be applied to -- or
+    /// removed from -- all of them afterwards. The first entry is the line carrying the command itself.
+    QVector<QPair<QDocumentLineHandle *, int> > pictureStatementLines;
+    int pictureStatementColumn = 0; ///< column the command starts at, on the first of those lines
+
 	bool operator ==(const Environment &env) const
 	{
-        return (name == env.name) && (id == env.id) && (excessCol == env.excessCol) && (origName == env.origName) && (level == env.level);
+        // Deliberately not compared: dlh, startingColumn, ticket, and every pictureStatement* member except
+        // the flag. They differ from line to line, and comparing them would stop the environment stacks from
+        // ever being equal again -- which is exactly what lets the syntax check stop cascading downwards.
+        return (name == env.name) && (id == env.id) && (excessCol == env.excessCol) && (origName == env.origName) && (level == env.level)
+                && (pictureStatementOpen == env.pictureStatementOpen);
 	}
 	bool operator !=(const Environment &env) const
 	{
-        return (name != env.name) || (id != env.id) || (excessCol != env.excessCol) || (origName != env.origName) || (level != env.level);
+        return !(*this == env);
 	}
 };
 
@@ -112,6 +129,9 @@ public:
 	int topEnv(const QString &name, const StackEnvironment &envs, const int id = -1);
 	bool checkCommand(const QString &cmd, const StackEnvironment &envs);
 	static bool equalEnvStack(StackEnvironment env1, StackEnvironment env2);
+    int pictureEnvIndex(const StackEnvironment &envs);
+    void markUnterminatedStatement(const Environment &env, Ranges &newRanges, QDocumentLineHandle *dlh, const QString &line, int commentStart);
+    void clearUnterminatedStatement(const Environment &env, QDocumentLineHandle *dlh);
 
     void setLtxCommands(QSharedPointer<LatexParser> cmds);
     void setSpeller(SpellerUtility *su);

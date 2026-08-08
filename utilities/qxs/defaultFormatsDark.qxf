@@ -117,6 +117,11 @@
   <format id="picture-keyword" >
     <foreground>#60f285</foreground>
   </format>
+  <format id="picture-unterminated" >
+      <bold>false</bold>
+      <italic>false</italic>
+      <background>#40c8c8c8</background>
+  </format>
   <format id="braceMatch" >
     <bold>true</bold>
     <italic>false</italic>

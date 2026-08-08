@@ -569,6 +569,102 @@ bool SyntaxCheck::checkCommand(const QString &cmd, const StackEnvironment &envs)
 }
 
 /*!
+ * \brief index of the innermost picture environment on the stack, -1 if there is none
+ * \param envs environment stack
+ */
+int SyntaxCheck::pictureEnvIndex(const StackEnvironment &envs)
+{
+    for (int i = envs.size() - 1; i > -1; --i) {
+        const QString &name = envs.at(i).name;
+        if (name == "pictureHighlight" || ltxCommands->environmentAliases.values(name).contains("pictureHighlight"))
+            return i;
+    }
+    return -1;
+}
+
+/// column of the first non blank character, 0 if the line is blank
+static int firstNonSpaceColumn(const QString &s)
+{
+    for (int i = 0; i < s.length(); ++i)
+        if (!s.at(i).isSpace())
+            return i;
+    return 0;
+}
+
+/*!
+ * \brief shade a path command whose terminating ";" is missing
+ *
+ * That the ";" was forgotten usually only becomes apparent while checking a *later* line -- the one
+ * where the next command starts, or where the environment ends. The shading therefore has to be
+ * applied to a line other than the one being checked.
+ */
+void SyntaxCheck::markUnterminatedStatement(const Environment &env, Ranges &newRanges, QDocumentLineHandle *dlh, const QString &line, int commentStart)
+{
+    for (int i = 0; i < env.pictureStatementLines.size(); ++i) {
+        QDocumentLineHandle *stmtDlh = env.pictureStatementLines.at(i).first;
+        const int stmtTicket = env.pictureStatementLines.at(i).second;
+        if (!stmtDlh)
+            continue;
+        // the command starts part way into the first line; a continuation line is shaded from its own
+        // first non blank character, so that the indentation stays clear of the shading
+        const bool isFirst = (i == 0);
+
+        if (stmtDlh == dlh) {
+            // this is the line being checked: paint it through newRanges as usual
+            const int from = isFirst ? env.pictureStatementColumn : firstNonSpaceColumn(line);
+            stmtDlh->lockForWrite(); // setCookie() is not thread safe, it needs the write lock
+            stmtDlh->setCookie(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE, QVariant(from));
+            stmtDlh->unlock();
+            const int end = commentStart >= 0 ? commentStart : line.length();
+            if (end > from) {
+                Error elem;
+                elem.type = ERR_highlight;
+                elem.format = mFormatList["pictureUnterminated"];
+                elem.range = QPair<int, int>(from, end - from);
+                newRanges.prepend(elem); // background first, the token colors are drawn on top
+            }
+            continue;
+        }
+        // the lines are marked again on every recheck of the line the evidence sits on, so drop a
+        // previous shading first: without this the overlays would pile up. clearOverlays() takes the
+        // lock itself, hence before lockForWrite().
+        stmtDlh->clearOverlays(mFormatList["pictureUnterminated"]);
+        stmtDlh->lockForWrite();
+        if (stmtDlh->getCurrentTicket() == stmtTicket) {
+            // Remember the verdict on each line itself: the shading is produced while checking a *later*
+            // line, so without it the shading would be lost as soon as one of these lines is rechecked on
+            // its own (editing it clears its overlays, and nothing makes the later line run again).
+            // checkLine() restores it from the column stored here.
+            const QString text = cutComment(stmtDlh->text());
+            const int from = isFirst ? env.pictureStatementColumn : firstNonSpaceColumn(text);
+            stmtDlh->setCookie(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE, QVariant(from));
+            const int length = text.length() - from;
+            if (length > 0)
+                stmtDlh->addOverlayNoLock(QFormatRange(from, length, mFormatList["pictureUnterminated"]));
+        }
+        stmtDlh->unlock();
+    }
+}
+
+/*!
+ * \brief counterpart of markUnterminatedStatement(): the ";" turned up after all
+ */
+void SyntaxCheck::clearUnterminatedStatement(const Environment &env, QDocumentLineHandle *dlh)
+{
+    for (const QPair<QDocumentLineHandle *, int> &entry : env.pictureStatementLines) {
+        QDocumentLineHandle *stmtDlh = entry.first;
+        if (!stmtDlh)
+            continue;
+        stmtDlh->lockForWrite(); // removeCookie() is not thread safe, it needs the write lock
+        stmtDlh->removeCookie(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE);
+        stmtDlh->unlock();
+        if (stmtDlh != dlh)
+            stmtDlh->clearOverlays(mFormatList["pictureUnterminated"]);
+    }
+    // for the line being checked the overlays are rebuilt from newRanges anyway, dropping the cookie is enough
+}
+
+/*!
 * \brief compare two environment stacks
 * \param env1
 * \param env2
@@ -686,6 +782,43 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
                 if(activeEnv.top().name == envName){
                     activeEnv.pop();
                     continue;
+                }
+            }
+        }
+
+        // Track whether the ";" terminating a path command is still missing. This runs before the
+        // \begin/\end handling further down, so that the picture environment is still on the stack
+        // when its \end is seen.
+        if (tk.type == Token::command || tk.type == Token::punctuation) {
+            const QString tokenText = tk.getText();
+            const int pictureEnv = pictureEnvIndex(activeEnv);
+            if (pictureEnv >= 0) {
+                // The commands of pgf/TikZ that open a path and need a ";" of their own.
+                static const QSet<QString> pgfPathCommands = {
+                    "\\path", "\\draw", "\\fill", "\\filldraw", "\\shade", "\\shadedraw", "\\pattern",
+                    "\\clip", "\\useasboundingbox", "\\node", "\\coordinate", "\\matrix", "\\pic", "\\graph"
+                };
+                if (tk.type == Token::command && pgfPathCommands.contains(tokenText)) {
+                    if (activeEnv.at(pictureEnv).pictureStatementOpen) {
+                        // a new statement starts while the previous one is still open: that one can no
+                        // longer be continued, so its ";" really is missing
+                        markUnterminatedStatement(activeEnv.at(pictureEnv), newRanges, dlh, line, commentStart);
+                    }
+                    activeEnv[pictureEnv].pictureStatementOpen = true;
+                    activeEnv[pictureEnv].pictureStatementLevel = tk.level;
+                    activeEnv[pictureEnv].pictureStatementLines.clear();
+                    activeEnv[pictureEnv].pictureStatementLines.append(qMakePair(dlh, ticket));
+                    activeEnv[pictureEnv].pictureStatementColumn = tk.start;
+                } else if (tk.type == Token::command && tokenText == "\\end"
+                           && activeEnv.at(pictureEnv).pictureStatementOpen) {
+                    // the picture environment ends: an open statement cannot be continued any more either
+                    markUnterminatedStatement(activeEnv.at(pictureEnv), newRanges, dlh, line, commentStart);
+                    activeEnv[pictureEnv].pictureStatementOpen = false;
+                } else if (tk.type == Token::punctuation && tokenText == ";"
+                           && tk.level <= activeEnv.at(pictureEnv).pictureStatementLevel) {
+                    // a ";" nested deeper belongs to the text of a node, not to the path command
+                    clearUnterminatedStatement(activeEnv.at(pictureEnv), dlh);
+                    activeEnv[pictureEnv].pictureStatementOpen = false;
                 }
             }
         }
@@ -1596,6 +1729,40 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
 			}
 		}
 	}
+
+    {
+        const int pictureEnv = pictureEnvIndex(activeEnv);
+        if (pictureEnv >= 0 && activeEnv.at(pictureEnv).pictureStatementOpen && dlh) {
+            // getCookieLocked() rather than hasCookie(): the latter expects the caller to hold the lock
+            const QVariant verdict = dlh->getCookieLocked(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE);
+            if (verdict.isValid()) {
+                // this line was found to be part of a statement missing its ";" on an earlier pass, while
+                // a later line was being checked. That line is not rechecked when this one is edited, so
+                // restore the shading from the column stored on the line itself.
+                const int from = verdict.toInt();
+                const int end = commentStart >= 0 ? commentStart : line.length();
+                if (end > from) {
+                    Error elem;
+                    elem.type = ERR_highlight;
+                    elem.format = mFormatList["pictureUnterminated"];
+                    elem.range = QPair<int, int>(from, end - from);
+                    newRanges.prepend(elem); // background first, the token colors are drawn on top
+                }
+            }
+            // Remember this line as one the statement spans, so that it can be shaded together with the
+            // others once the missing ";" comes to light further down. The cap keeps the environment --
+            // which is copied into a cookie on every line -- from growing without bound in a picture
+            // where a statement is never terminated at all.
+            Environment &env = activeEnv[pictureEnv];
+            if (env.pictureStatementLines.size() < 200
+                    && (env.pictureStatementLines.isEmpty() || env.pictureStatementLines.last().first != dlh))
+                env.pictureStatementLines.append(qMakePair(dlh, ticket));
+
+            // No clearing here on purpose. A line which merely continues the statement proves nothing:
+            // dropping the shading at that point loses it for good, because the line carrying the evidence
+            // further down is not necessarily rechecked afterwards. Only a ";" clears it.
+        }
+    }
 
     if(!activeEnv.isEmpty()){
         //check active env for env highlighting (math,verbatim)

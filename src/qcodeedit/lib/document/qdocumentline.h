@@ -75,6 +75,7 @@ class QCE_EXPORT QDocumentLine
             LEXER_RAW_COOKIE = 6,
             LEXER_COMMANDSTACK_COOKIE = 7,
             LEXER_COMMENTSTART_COOKIE = 8,
+            UNTERMINATED_STATEMENT_COOKIE = 9, ///< line starts a picture path command whose ";" is missing
 			PICTURE_COOKIE = 42,
 			PICTURE_COOKIE_DRAWING_POS = 43,
 			GRAMMAR_ERROR_COOKIE = 44
