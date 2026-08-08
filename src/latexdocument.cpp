@@ -3574,7 +3574,10 @@ void LatexDocument::updateSettings()
     QList<QPair<QString,QString> >formats;
     formats<<QPair<QString,QString>("math","numbers")<<QPair<QString,QString>("verbatim","verbatim")<<QPair<QString,QString>("pictureHighlight","picture")
             <<QPair<QString,QString>("#math","math-keyword")<<QPair<QString,QString>("#pictureHighlight","picture-keyword")<<QPair<QString,QString>("&math","math-delimiter")
-            <<QPair<QString,QString>("#mathText","math-text")<<QPair<QString,QString>("align-ampersand","align-ampersand")<<QPair<QString,QString>("comment","comment");
+            <<QPair<QString,QString>("#mathText","math-text")<<QPair<QString,QString>("align-ampersand","align-ampersand")<<QPair<QString,QString>("comment","comment")
+            <<QPair<QString,QString>("pictureValue","picture-value")<<QPair<QString,QString>("pictureNumber","picture-number")<<QPair<QString,QString>("pictureBracket","picture-bracket")
+            <<QPair<QString,QString>("pictureCoordinate","picture-coordinate")<<QPair<QString,QString>("pictureOperation","picture-operation")
+            <<QPair<QString,QString>("pictureError","picture-error")<<QPair<QString,QString>("pictureUnterminated","picture-unterminated");
     for(const auto &elem : formats){
         fmtList.insert(elem.first,getFormatId(elem.second));
     }

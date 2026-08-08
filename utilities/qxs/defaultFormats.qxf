@@ -112,10 +112,50 @@
         <foreground>#0095ff</foreground>
     </format>
     <format id="picture" >
-        <foreground>#804000</foreground>
+        <bold>false</bold>
+        <italic>false</italic>
+        <foreground>#000000</foreground>
     </format>
     <format id="picture-keyword" >
-        <foreground>#c06000</foreground>
+        <bold>true</bold>
+        <italic>false</italic>
+        <foreground>#0000b2</foreground>
+    </format>
+    <format id="picture-value" >
+        <bold>false</bold>
+        <italic>true</italic>
+        <foreground>#008000</foreground>
+    </format>
+    <format id="picture-number" >
+        <bold>false</bold>
+        <italic>false</italic>
+        <foreground>#008000</foreground>
+    </format>
+    <format id="picture-bracket" >
+        <bold>false</bold>
+        <italic>false</italic>
+        <foreground>#737373</foreground>
+    </format>
+    <format id="picture-coordinate" >
+        <bold>false</bold>
+        <italic>false</italic>
+        <foreground>#800080</foreground>
+    </format>
+    <format id="picture-operation" >
+        <bold>true</bold>
+        <italic>false</italic>
+        <foreground>#000000</foreground>
+    </format>
+    <format id="picture-error" >
+        <bold>true</bold>
+        <italic>false</italic>
+        <waveUnderline>true</waveUnderline>
+        <foreground>#cc0000</foreground>
+    </format>
+    <format id="picture-unterminated" >
+        <bold>false</bold>
+        <italic>false</italic>
+        <background>#30000000</background>
     </format>
     <format id="braceMatch" >
         <bold>true</bold>

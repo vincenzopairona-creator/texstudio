@@ -112,10 +112,50 @@
     <foreground>#a960f2</foreground>
   </format>
   <format id="picture" >
-    <foreground>#f2f260</foreground>
+    <bold>false</bold>
+    <italic>false</italic>
   </format>
+  <!-- Palette for a dark background; the light theme keeps the pgfmanual colors instead. -->
   <format id="picture-keyword" >
-    <foreground>#60f285</foreground>
+    <bold>true</bold>
+    <italic>false</italic>
+    <foreground>#67d8ef</foreground>
+  </format>
+  <format id="picture-value" >
+    <bold>false</bold>
+    <italic>true</italic>
+    <foreground>#a6e22b</foreground>
+  </format>
+  <format id="picture-number" >
+    <bold>false</bold>
+    <italic>false</italic>
+    <foreground>#a6e22b</foreground>
+  </format>
+  <format id="picture-bracket" >
+    <bold>false</bold>
+    <italic>false</italic>
+    <foreground>#b3b3b3</foreground>
+  </format>
+  <format id="picture-coordinate" >
+    <bold>false</bold>
+    <italic>false</italic>
+    <foreground>#f92472</foreground>
+  </format>
+  <format id="picture-operation" >
+    <bold>true</bold>
+    <italic>false</italic>
+    <foreground>#f8f8f2</foreground>
+  </format>
+  <format id="picture-error" >
+    <bold>true</bold>
+    <italic>false</italic>
+    <waveUnderline>true</waveUnderline>
+    <foreground>#ff4444</foreground>
+  </format>
+  <format id="picture-unterminated" >
+    <bold>false</bold>
+    <italic>false</italic>
+    <background>#40c8c8c8</background>
   </format>
   <format id="braceMatch" >
     <bold>true</bold>

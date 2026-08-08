@@ -499,6 +499,161 @@ int SyntaxCheck::containsEnv(const QString &name, const StackEnvironment &envs, 
     return 0;
 }
 /*!
+ * \brief find the innermost environment which uses picture highlighting
+ *
+ * Unlike containsEnv() this returns the position in the stack, so that per-environment state
+ * (Environment::pictureCommand) can be carried over from one line to the next.
+ * \param envs stack of environments
+ * \return index into envs, or -1 if no picture environment is active
+ */
+int SyntaxCheck::pictureEnvIndex(const StackEnvironment &envs)
+{
+    for (int i = envs.size() - 1; i > -1; --i) {
+        const QString &name = envs.at(i).name;
+        if (name == "pictureHighlight" || ltxCommands->environmentAliases.values(name).contains("pictureHighlight"))
+            return i;
+    }
+    return -1;
+}
+/*!
+ * \brief color the characters the tokenizer emits no token for at all
+ *
+ * Coordinate parens are not tokenized, so they can only be found by looking at the raw text between
+ * two tokens. Called for every gap between tokens and once more for the tail of the line, since the
+ * closing paren of a trailing coordinate like "(7,7)" has no token following it.
+ * \param line text of the line
+ * \param from first column to inspect
+ * \param to column to stop at (exclusive)
+ * \param pictureBracketEnd end column of the open "[...]" span, in/out: set when a bracket is found
+ * here, cleared once the scan runs past its end. Pass the value the gap starts with, not one the
+ * caller already reset for the token that follows the gap
+ * \param newRanges ranges of the line being checked
+ */
+void SyntaxCheck::highlightPictureGap(const QString &line, int from, int to, int &pictureBracketEnd, Ranges &newRanges)
+{
+    for (int p = from; p < to && p < line.length(); p++) {
+        if (pictureBracketEnd >= 0 && p >= pictureBracketEnd) {
+            pictureBracketEnd = -1; // the gap itself runs past the end of the "[...]" span
+        }
+        const QChar c = line.at(p);
+        if (c == QLatin1Char('(') || c == QLatin1Char(')')) {
+            Error gelem;
+            gelem.type = ERR_highlight;
+            gelem.range = QPair<int, int>(p, 1);
+            // a paren inside a [...] belongs to an option value ("shift={(1,1)}"), not to a coordinate
+            // of the picture itself
+            gelem.format = (pictureBracketEnd >= 0 && p < pictureBracketEnd)
+                    ? mFormatList["pictureValue"] : mFormatList["pictureCoordinate"];
+            newRanges.append(gelem);
+        } else if (c == QLatin1Char('[') && pictureBracketEnd < 0) {
+            // an option bracket the tokenizer didn't wrap into its own token (this happens after a bare
+            // path-operation word like "circle"/"arc" rather than a \command): locate its matching ']'
+            // so the tokens inside get bracket-content coloring instead of being mistaken for bare
+            // path-operation words
+            int closePos = line.indexOf(QLatin1Char(']'), p);
+            if (closePos >= 0) {
+                pictureBracketEnd = closePos + 1;
+                highlightPictureBracket(line, p, closePos, newRanges);
+            }
+        }
+    }
+}
+/*!
+ * \brief check whether a column sits inside the parens of a coordinate
+ *
+ * Counts the parens opened but not closed before that column. Used to tell the unary minus of
+ * "(-1.5,0)" from a lone "-" between two coordinates, which tikz rejects. The raw text is counted
+ * rather than the tokens because the tokenizer emits no token for a bare coordinate paren.
+ * \param line text of the line
+ * \param pos column to test
+ * \return a paren is still open at that column
+ */
+bool SyntaxCheck::insidePictureParens(const QString &line, int pos)
+{
+    int depth = 0;
+    for (int p = 0; p < pos && p < line.length(); p++) {
+        const QChar c = line.at(p);
+        if (c == QLatin1Char('\\'))
+            p++; // an escaped paren does not open or close anything
+        else if (c == QLatin1Char('('))
+            depth++;
+        else if (c == QLatin1Char(')') && depth > 0)
+            depth--;
+    }
+    return depth > 0;
+}
+/*!
+ * \brief color a whole "[...]" option span
+ *
+ * Base-fills the span in the key color and paints the brackets themselves and the "="/"," separators
+ * over it. The base fill matters because the tokenizer emits no token at all for some characters
+ * (the ">" of "[->]", and the "=" and "," of a bracket it wrapped in a token of its own), so they
+ * would otherwise stay uncolored; the separators are found in the raw text for the same reason.
+ * Child tokens are processed afterwards and override their own sub-ranges.
+ * \param line text of the line
+ * \param from column of the opening "["
+ * \param to column of the closing "]"
+ * \param newRanges ranges of the line being checked
+ */
+void SyntaxCheck::highlightPictureBracket(const QString &line, int from, int to, Ranges &newRanges)
+{
+    Error fill;
+    fill.type = ERR_highlight;
+    fill.range = QPair<int, int>(from, to - from + 1);
+    fill.format = mFormatList["pictureNumber"];
+    newRanges.append(fill);
+    for (int p = from; p <= to && p < line.length(); p++) {
+        const QChar c = line.at(p);
+        if (p == from || p == to || c == QLatin1Char('=') || c == QLatin1Char(',')) {
+            Error sep;
+            sep.type = ERR_highlight;
+            sep.range = QPair<int, int>(p, 1);
+            sep.format = mFormatList["pictureBracket"];
+            newRanges.append(sep);
+        }
+    }
+}
+/*!
+ * \brief check whether a math delimiter is provably left open
+ *
+ * checkLine() only ever sees a single line, so "no closing delimiter on this line" does not mean the
+ * math environment is broken: inline math may well continue on the following lines, also inside the
+ * argument of a \node. What *is* an error regardless of how many lines follow is a group which ends
+ * while math is still open, as in "{$y}". Only that case is reported, so that math spanning several
+ * lines is never flagged.
+ * \param startWord opening delimiter, e.g. "$"
+ * \param tl token list of the line
+ * \param i index of the opening delimiter within tl
+ * \param line text of the line
+ * \return the enclosing group closes before the matching delimiter does
+ */
+bool SyntaxCheck::mathDelimiterLeftOpen(const QString &startWord, const TokenList &tl, int i, const QString &line)
+{
+    const int idx = ltxCommands->mathStartCommands.indexOf(startWord);
+    if (idx < 0)
+        return false; // not a delimiter we know -> don't claim it is broken
+    const QString stopWord = ltxCommands->mathStopCommands.value(idx);
+    const Token &tk = tl.at(i);
+    // scan the raw text rather than the tokens: "{...}" is emitted as a single braces token, so there
+    // is no token whose start or end marks the enclosing group's closing brace
+    int depth = 0; // groups opened after the delimiter, whose "}" does not end the enclosing one
+    for (int p = tk.start + tk.length; p < line.length(); p++) {
+        if (QStringView(line).mid(p, stopWord.length()) == stopWord)
+            return false; // math is closed
+        const QChar c = line.at(p);
+        if (c == QLatin1Char('\\')) {
+            p++; // an escaped brace (\{, \}) does not open or close a group
+        } else if (c == QLatin1Char('{')) {
+            depth++;
+        } else if (c == QLatin1Char('}')) {
+            if (depth == 0)
+                return true; // the group holding the math ends first
+            depth--;
+        }
+    }
+    return false; // line ends with math still open: it may simply continue below
+}
+/*!
  * \brief check if math env is active
  *
  * Similar to containsEnv, but determines if math is active as it can be disabled by a virtual text env
@@ -569,6 +724,74 @@ bool SyntaxCheck::checkCommand(const QString &cmd, const StackEnvironment &envs)
 }
 
 /*!
+* \brief check whether tl.at(i) is a known key for the given owning command
+* \return true if valid, or if no %keyvals declaration exists for that command (can't verify -> assume valid)
+*/
+bool SyntaxCheck::checkKeyValKey(const QString &command, const TokenList &tl, int i, const QString &line, const QString &keyOverride)
+{
+    const Token &tk = tl.at(i);
+    // keyOverride lets the caller check a key the tokenizer split over several tokens ("start angle")
+    QString value = keyOverride.isEmpty() ? line.mid(tk.start, tk.length) : keyOverride;
+
+    // search stored keyvals
+    QString elem;
+    foreach(elem, ltxCommands->possibleCommands.keys()) {
+        // cwl "#keyvals:command#c" declarations (used e.g. by tikz, where several library files
+        // cumulatively contribute options for the same command) are stored with the "#c" suffix
+        // kept as part of the possibleCommands key itself, so it must be matched here too
+        if (elem.startsWith("key%") && (elem.mid(4) == command || elem.mid(4) == command + "#c"))
+            break;
+        if (elem.startsWith("key%") && elem.mid(4, command.length()) == command && elem.mid(4 + command.length(), 1) == "/" && !elem.endsWith("#c")) {
+            // special treatment for distinguishing \command[keyvals]{test} where argument needs to equal test (used in yathesis.cwl)
+            // now find mandatory argument
+            QString subcommand;
+            for (int k = i + 1; k < tl.length(); k++) {
+                Token tk_elem = tl.at(k);
+                if (tk_elem.level > tk.level)
+                    continue;
+                if (tk_elem.level < tk.level)
+                    break;
+                if (tk_elem.type == Token::braces) {
+                    subcommand = line.mid(tk_elem.start + 1, tk_elem.length - 2);
+                    if (elem == "key%" + command + "/" + subcommand) {
+                        break;
+                    } else {
+                        subcommand.clear();
+                    }
+                }
+            }
+            if (!subcommand.isEmpty())
+                elem = "key%" + command + "/" + subcommand;
+            else
+                elem.clear();
+            break;
+        }
+        elem.clear();
+    }
+    if (elem.isEmpty()) {
+        return true; // no %keyvals declaration found for this command -> can't verify, assume valid
+    }
+    QStringList lst = ltxCommands->possibleCommands[elem].values();
+    QStringList::iterator iterator;
+    QStringList toAppend;
+    for (iterator = lst.begin(); iterator != lst.end(); ++iterator) {
+        int idx = iterator->indexOf("#");
+        if (idx > -1)
+            *iterator = iterator->left(idx);
+
+        idx = iterator->indexOf("=");
+        if (idx > -1) {
+            *iterator = iterator->left(idx);
+        }
+        if (iterator->startsWith("%")) {
+            toAppend << ltxCommands->possibleCommands[*iterator].values();
+        }
+    }
+    lst << toAppend;
+    return lst.contains(value);
+}
+
+/*!
 * \brief compare two environment stacks
 * \param env1
 * \param env2
@@ -624,6 +847,76 @@ void SyntaxCheck::markUnclosedEnv(Environment env)
 }
 
 /*!
+ * \brief shade the line of a path command whose terminating ";" turned out to be missing
+ *
+ * That a ";" was forgotten only shows up later, when a new path command or the end of the picture
+ * environment is reached, so the line usually is not the one being checked and has to be painted
+ * through its own line handle. Its ticket is verified first: if it has been edited in the meantime
+ * it is being rechecked anyway and must not be painted from here.
+ * \param env picture environment holding the open statement
+ * \param newRanges ranges of the line currently being checked
+ * \param dlh line currently being checked
+ * \param line text of the line currently being checked
+ * \param commentStart column the comment starts at, or -1
+ */
+void SyntaxCheck::markUnterminatedStatement(const Environment &env, Ranges &newRanges, QDocumentLineHandle *dlh, const QString &line, int commentStart)
+{
+    QDocumentLineHandle *stmtDlh = env.pictureStatementDlh;
+    if (!stmtDlh)
+        return;
+    if (stmtDlh == dlh) {
+        // the command sits on the very line being checked: paint it through newRanges as usual
+        stmtDlh->lockForWrite(); // setCookie() is not thread safe, it needs the write lock
+        stmtDlh->setCookie(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE, QVariant(true));
+        stmtDlh->unlock();
+        const int end = commentStart >= 0 ? commentStart : line.length();
+        if (end > env.pictureStatementColumn) {
+            Error elem;
+            elem.type = ERR_highlight;
+            elem.format = mFormatList["pictureUnterminated"];
+            elem.range = QPair<int, int>(env.pictureStatementColumn, end - env.pictureStatementColumn);
+            newRanges.prepend(elem); // background first, the token colors are drawn on top
+        }
+        return;
+    }
+    // the line is marked again on every recheck of the line the evidence sits on, so drop a previous
+    // shading first: without this the overlays would pile up on that line. clearOverlays() takes the
+    // lock itself, hence before lockForWrite().
+    stmtDlh->clearOverlays(mFormatList["pictureUnterminated"]);
+    stmtDlh->lockForWrite();
+    if (stmtDlh->getCurrentTicket() == env.pictureStatementTicket) {
+        // Remember the verdict on the line itself: the shading is produced while checking a *later* line,
+        // so without this it would be lost as soon as the marked line is rechecked on its own (editing it
+        // clears its overlays, and nothing makes the later line run again). checkLine() restores it.
+        stmtDlh->setCookie(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE, QVariant(true));
+        const QString text = cutComment(stmtDlh->text());
+        const int length = text.length() - env.pictureStatementColumn;
+        if (length > 0)
+            stmtDlh->addOverlayNoLock(QFormatRange(env.pictureStatementColumn, length, mFormatList["pictureUnterminated"]));
+    }
+    stmtDlh->unlock();
+}
+/*!
+ * \brief remove the shading from the line of a path command which turns out to be terminated after all
+ *
+ * Counterpart of markUnterminatedStatement(): a line shaded earlier has to lose the shading once the
+ * statement is continued or closed, e.g. after the following line has been turned into a continuation.
+ * \param env picture environment holding the open statement
+ * \param dlh line currently being checked, which is repainted anyway
+ */
+void SyntaxCheck::clearUnterminatedStatement(const Environment &env, QDocumentLineHandle *dlh)
+{
+    QDocumentLineHandle *stmtDlh = env.pictureStatementDlh;
+    if (!stmtDlh)
+        return;
+    stmtDlh->lockForWrite(); // removeCookie() is not thread safe, it needs the write lock
+    stmtDlh->removeCookie(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE);
+    stmtDlh->unlock();
+    if (stmtDlh != dlh)
+        stmtDlh->clearOverlays(mFormatList["pictureUnterminated"]);
+    // for the line being checked the overlays are rebuilt from newRanges anyway, dropping the cookie is enough
+}
+/*!
 * \brief check if the tokenstack contains a definition-token
 * \param stack tokenstack
 * \return contains a definition
@@ -671,12 +964,61 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
     }
 
     // check command-words
+    bool tikzScopeEnded = false; // a "\tikz" scope ended on the token just processed
+    int pictureBracketEnd = -1; // end column of the most recently opened [...] span (picture-mode highlighting)
+    int pictureLastEnd = -1; // end column of the last token processed in picture mode (used to catch untokenized chars like bare parens)
+    // the most recent \draw-like command is tracked in Environment::pictureCommand (i.e. it survives across
+    // lines), because it is needed to validate keys in brackets that follow a bare word
+    // (e.g. "arc [start angle=...]"), whose tokens get no usable optionalCommandName from the tokenizer,
+    // and which may continue a statement started on an earlier line
 	for (int i = 0; i < tl.length(); i++) {
         Token &tk = tl[i];
         // remove top env if column exceeds columnlimit
         // used for formula -> brace -> {....}
         while(!activeEnv.isEmpty() && activeEnv.top().endingColumn>=0 && tk.start>activeEnv.top().endingColumn){
             Environment env=activeEnv.pop();
+        }
+        // the token which ends a "\tikz" scope (its ";" or its closing brace) still belongs to the
+        // picture, so the scope is only dropped once that token has been processed
+        if (tikzScopeEnded) {
+            if (!activeEnv.isEmpty() && activeEnv.top().origName == "\\tikz")
+                activeEnv.pop();
+            tikzScopeEnded = false;
+        }
+        if (tk.type == Token::command && line.mid(tk.start, tk.length) == "\\tikz") {
+            // "\tikz" highlights like a tikzpicture without being an environment: its scope is the
+            // {...} group that follows or, when there is none, everything up to the first ";"
+            Environment env;
+            env.name = "pictureHighlight"; // what containsEnv()/pictureEnvIndex() look for
+            env.origName = "\\tikz";
+            env.id = 1;
+            env.dlh = dlh;
+            env.ticket = ticket;
+            env.level = tk.level;
+            env.startingColumn = tk.start + tk.length;
+            env.endingColumn = -1;
+            int j = i + 1;
+            if (j < tl.length() && tl.at(j).type == Token::squareBracket) {
+                // skip the [options] argument together with the tokens nested inside it
+                const int optEnd = tl.at(j).start + tl.at(j).length;
+                for (j++; j < tl.length() && tl.at(j).start < optEnd; j++) ;
+            }
+            if (j < tl.length() && tl.at(j).type == Token::braces) {
+                env.endingColumn = tl.at(j).start + tl.at(j).length - 1; // group opens and closes here
+            } else if (j >= tl.length() || tl.at(j).type != Token::openBrace) {
+                env.pictureUntilSemicolon = true; // no group at all: it runs to the first ";"
+            }
+            // an openBrace means the group is closed on one of the following lines: leave endingColumn
+            // at -1 and drop the scope on the matching closing brace instead
+            activeEnv.push(env);
+        } else if (!activeEnv.isEmpty() && activeEnv.top().origName == "\\tikz") {
+            const Environment &tikzEnv = activeEnv.top();
+            if (tikzEnv.pictureUntilSemicolon) {
+                if (tk.type == Token::punctuation && tk.level <= tikzEnv.level && line.mid(tk.start, tk.length) == ";")
+                    tikzScopeEnded = true;
+            } else if (tikzEnv.endingColumn < 0 && tk.type == Token::closeBrace) {
+                tikzScopeEnded = true;
+            }
         }
         // handle single command env stop e.g. \ExplSyntaxOff
         if(tk.type==Token::command){
@@ -858,6 +1200,265 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
             }
             newRanges.append(elem);
         }
+        // picture-mode highlighting (tikzpicture and other environments aliased to "pictureHighlight")
+        // mirrors the pgfmanual style: commands in "picture-keyword", [option] brackets in the same
+        // color as {environment} braces, keys inside [...] options in upright "picture-number",
+        // values inside [...] options in italic "picture-value", bare coordinates outside any [...]
+        // in upright "picture-number", everything else in the base "picture" color. Math/text
+        // sub-environments keep their own coloring and are skipped here. \begin/\end and their
+        // {envname} argument keep their normal environment-boundary color (distinct from picture-keyword).
+        bool activeIsPictureEnv = !activeEnv.isEmpty() && activeEnv.top().name != "math" && activeEnv.top().name != "text"
+                && containsEnv("pictureHighlight", activeEnv);
+        bool isBeginArgOfPictureEnv = false;
+        if (!activeIsPictureEnv) {
+            // \begin{env}, and its argument token, are processed *before* the env gets pushed onto
+            // activeEnv (the push happens later while handling the argument), so neither can see itself
+            // as "inside" a pictureHighlight env via containsEnv(); resolve the name directly instead
+            int nameTok = -1;
+            if (tk.type == Token::braces || tk.type == Token::beginEnv)
+                nameTok = i;
+            else if (tk.type == Token::command && line.mid(tk.start, tk.length) == "\\begin" && i + 1 < tl.length())
+                nameTok = i + 1;
+            if (nameTok >= 0) {
+                QString envName = line.mid(tl.at(nameTok).start, tl.at(nameTok).length);
+                if (envName.startsWith('{') && envName.endsWith('}')) {
+                    envName = envName.mid(1, envName.length() - 2);
+                }
+                if (ltxCommands->environmentAliases.values(envName).contains("pictureHighlight")) {
+                    isBeginArgOfPictureEnv = true;
+                }
+            }
+        }
+        if (activeIsPictureEnv || isBeginArgOfPictureEnv) {
+            Error elem;
+            elem.type = ERR_highlight;
+            elem.range = QPair<int, int>(tk.start, tk.length);
+            const QString tokenText = line.mid(tk.start, tk.length);
+            // catch characters the tokenizer never emits a token for (e.g. bare coordinate parens)
+            if (tk.start < pictureLastEnd) {
+                pictureLastEnd = -1; // moved to a new line
+            }
+            if (pictureLastEnd >= 0 && tk.start > pictureLastEnd)
+                highlightPictureGap(line, pictureLastEnd, tk.start, pictureBracketEnd, newRanges);
+            pictureLastEnd = qMax(pictureLastEnd, tk.start + tk.length);
+            // Keep this *after* the gap scan above. The gap covers the text preceding the current
+            // token, so it can still lie inside the "[...]" that this token leaves behind; resetting
+            // first hands the gap to the scan as if it were outside, and the closing paren of
+            // "shift={(1,1)}" comes out colored as a coordinate of the picture. The defect only shows
+            // on characters the tokenizer emits no token for, which makes it easy to miss.
+            if (tk.start >= pictureBracketEnd) {
+                pictureBracketEnd = -1; // left the most recently opened [...] span
+            }
+            // "$", "$$", "\(", "\[" and their closing counterparts are tokenized as commands, but they
+            // delimit math, they are not picture commands: they must neither be painted here nor be
+            // remembered as the active command
+            const bool isMathDelimiter = ltxCommands->mathStartCommands.contains(tokenText)
+                    || ltxCommands->mathStopCommands.contains(tokenText);
+            if (tk.type == Token::command && !isMathDelimiter) {
+                const int pictureEnv = pictureEnvIndex(activeEnv);
+                if (pictureEnv >= 0) {
+                    activeEnv[pictureEnv].pictureCommand = tokenText;
+                    // path commands must be terminated by ";". Track whether that ";" is still missing, so
+                    // that the lines the statement spans can be shaded until it is typed.
+                    static const QSet<QString> pgfPathCommands = {
+                        "\\path", "\\draw", "\\fill", "\\filldraw", "\\shade", "\\shadedraw", "\\pattern",
+                        "\\clip", "\\useasboundingbox", "\\node", "\\coordinate", "\\matrix", "\\pic", "\\graph"
+                    };
+                    if (pgfPathCommands.contains(tokenText)) {
+                        if (activeEnv.at(pictureEnv).pictureStatementOpen) {
+                            // a new statement starts while the previous one is still open: that one can no
+                            // longer be continued, so its ";" really is missing
+                            markUnterminatedStatement(activeEnv.at(pictureEnv), newRanges, dlh, line, commentStart);
+                        }
+                        activeEnv[pictureEnv].pictureStatementOpen = true;
+                        activeEnv[pictureEnv].pictureStatementLevel = tk.level;
+                        activeEnv[pictureEnv].pictureStatementDlh = dlh;
+                        activeEnv[pictureEnv].pictureStatementTicket = ticket;
+                        activeEnv[pictureEnv].pictureStatementColumn = tk.start;
+                    }
+                }
+            }
+            if (tk.type == Token::command && tokenText == "\\end") {
+                const int pictureEnv = pictureEnvIndex(activeEnv);
+                // the picture environment ends: an open statement cannot be continued any more either
+                if (pictureEnv >= 0 && activeEnv.at(pictureEnv).pictureStatementOpen) {
+                    markUnterminatedStatement(activeEnv.at(pictureEnv), newRanges, dlh, line, commentStart);
+                    activeEnv[pictureEnv].pictureStatementOpen = false;
+                }
+            }
+            if (tk.type == Token::punctuation && tokenText == ";") {
+                const int pictureEnv = pictureEnvIndex(activeEnv);
+                // a ";" nested deeper belongs to the text of a node, not to the path command
+                if (pictureEnv >= 0 && tk.level <= activeEnv.at(pictureEnv).pictureStatementLevel) {
+                    // the statement is terminated after all: drop a shading applied on an earlier pass
+                    clearUnterminatedStatement(activeEnv.at(pictureEnv), dlh);
+                    activeEnv[pictureEnv].pictureStatementOpen = false;
+                }
+            }
+            if (isMathDelimiter) {
+                // fall through to the math handling below, which colors the opening and the closing
+                // delimiter alike (and flags the opening one while the math env is still unclosed)
+            } else if (tk.type == Token::command || tk.type == Token::commandUnknown) {
+                if (tokenText == "\\begin" || tokenText == "\\end") {
+                    // \begin/\end of the picture environment itself: same color as the commands inside
+                    // it. The continue skips the generic per-env "#" auto-highlight further below,
+                    // which would otherwise paint the very same range a second time.
+                    elem.format = mFormatList["#pictureHighlight"];
+                    newRanges.append(elem);
+                    continue;
+                }
+                // validate independently of the global syntax-check setting, so an unknown/incomplete
+                // command (e.g. "\drow", or "\dra" while still being typed) is visibly flagged instead
+                // of silently matching the color of a real command like \draw
+                if (checkCommand(tokenText, activeEnv)) {
+                    elem.format = mFormatList["#pictureHighlight"];
+                    newRanges.append(elem);
+                } else {
+                    elem.format = mFormatList["pictureError"];
+                    newRanges.append(elem);
+                    // skip the generic per-env "#" auto-highlight below (and, for commandUnknown, the
+                    // rest of that token-type's handling), which would otherwise repaint this token
+                    // in the normal "#pictureHighlight" color regardless of validity
+                    continue;
+                }
+            } else if (tk.type == Token::braces && pictureBracketEnd < 0) {
+                // the whole "{envname}" argument of \begin/\end: color just the brace delimiters,
+                // leave the env-name text itself for its own child token (env/beginEnv) to color.
+                // Inside a [...] a brace group is an option value instead ("shift={(1,1)}"), so it is
+                // left to the value branch further down.
+                Error open = elem;
+                open.range = QPair<int, int>(tk.start, 1);
+                open.format = mFormatList["pictureBracket"];
+                newRanges.append(open);
+                if (tk.length > 1) {
+                    Error close = elem;
+                    close.range = QPair<int, int>(tk.start + tk.length - 1, 1);
+                    close.format = mFormatList["pictureBracket"];
+                    newRanges.append(close);
+                }
+            } else if ((tk.type == Token::openBrace || tk.type == Token::closeBrace) && pictureBracketEnd < 0) {
+                elem.format = mFormatList["pictureBracket"];
+                newRanges.append(elem);
+            } else if (tk.type == Token::beginEnv || tk.type == Token::env) {
+                // the env-name text itself ("tikzpicture"): same color as the commands
+                elem.format = mFormatList["#pictureHighlight"];
+                newRanges.append(elem);
+            } else if (tk.type == Token::squareBracket) {
+                pictureBracketEnd = qMax(pictureBracketEnd, tk.start + tk.length);
+                highlightPictureBracket(line, tk.start, tk.start + tk.length - 1, newRanges);
+            } else if (tk.type == Token::openSquare || tk.type == Token::closeSquareBracket) {
+                pictureBracketEnd = qMax(pictureBracketEnd, tk.start + tk.length);
+                elem.format = mFormatList["pictureBracket"];
+                newRanges.append(elem);
+            } else if (pictureBracketEnd >= 0 && tk.type == Token::keyVal_key) {
+                // inside the most recently opened [...] span: keys upright, unless the key itself
+                // isn't a recognized option for its owning command (e.g. a typo like "raduis="),
+                // in which case flag it the same way as an unrecognized command.
+                // Symbol-only fragments (e.g. the lone "-" the tokenizer carves out of an arrow
+                // spec like "->") aren't real keys and must be excluded, or they'd always "fail"
+                // validation since no actual key is spelled that way.
+                bool looksLikeKey = false;
+                for (const QChar &c : tokenText) {
+                    if (c.isLetter()) { looksLikeKey = true; break; }
+                }
+                elem.format = (!looksLikeKey || checkKeyValKey(tk.optionalCommandName, tl, i, line)) ? mFormatList["pictureNumber"] : mFormatList["pictureError"];
+                newRanges.append(elem);
+            } else if (pictureBracketEnd >= 0 && tk.type == Token::word) {
+                // a word inside a bracket the tokenizer didn't recognize as a keyvals argument (e.g.
+                // "radius" in "circle [radius=1cm]", which the tokenizer only understands as such after a
+                // \command like \draw, not after a bare path-operation word like "circle"/"arc").
+                // Only words before the "=" are keys; the rest of the entry is a value. The tokenizer
+                // doesn't reliably emit a token for "=", so look at the raw text instead.
+                bool inValuePosition = false;
+                int keyStart = 0;
+                for (int p = tk.start - 1; p >= 0; p--) {
+                    const QChar c = line.at(p);
+                    if (c == QLatin1Char('=')) { inValuePosition = true; break; }
+                    if (c == QLatin1Char(',') || c == QLatin1Char('[')) { keyStart = p + 1; break; }
+                }
+                if (inValuePosition) {
+                    elem.format = mFormatList["pictureValue"];
+                } else {
+                    // a key can consist of several words ("start angle"), and the tokenizer emits one token
+                    // per word, so rebuild the whole key from the raw text before validating it
+                    int keyEnd = qMin(pictureBracketEnd, line.length());
+                    for (int p = tk.start + tk.length; p < keyEnd; p++) {
+                        const QChar c = line.at(p);
+                        if (c == QLatin1Char('=') || c == QLatin1Char(',') || c == QLatin1Char(']')) { keyEnd = p; break; }
+                    }
+                    const QString keyText = line.mid(keyStart, keyEnd - keyStart).trimmed();
+                    // validate against the most recently seen \draw-like command, since these keys are
+                    // typically declared for the very same commands (\draw, \node, ...) in tikz.cwl
+                    const int pictureEnv = pictureEnvIndex(activeEnv);
+                    const QString pictureCommand = pictureEnv >= 0 ? activeEnv.at(pictureEnv).pictureCommand : QString();
+                    elem.format = (pictureCommand.isEmpty() || checkKeyValKey(pictureCommand, tl, i, line, keyText))
+                            ? mFormatList["pictureNumber"] : mFormatList["pictureError"];
+                }
+                newRanges.append(elem);
+            } else if (pictureBracketEnd >= 0 && (tokenText == "=" || tokenText == ",")) {
+                // separators, not values: same color as the brackets themselves. The tokenizer emits a
+                // token for them only in a bracket it did not wrap in a token of its own, which is why
+                // they would otherwise come out styled as a value there but not in "[fill=green!20]"
+                elem.format = mFormatList["pictureBracket"];
+                newRanges.append(elem);
+            } else if (pictureBracketEnd >= 0) {
+                // inside the most recently opened [...] span: everything else (values) italic
+                elem.format = mFormatList["pictureValue"];
+                newRanges.append(elem);
+            } else if ((tk.type == Token::punctuation || tk.type == Token::symbol) && tokenText == "-") {
+                // A "-" is a path connector when it pairs with an adjacent "-" or "|" ("--", "-|",
+                // "|-"), and a unary minus when it sits inside the parens of a coordinate. Standing
+                // alone between two coordinates it is neither, and tikz fails to compile, so flag it
+                // like an unknown path operation. The neighbours are read from the raw text: the
+                // tokenizer does not reliably emit a token for "|", nor for every "-".
+                const QChar before = tk.start > 0 ? line.at(tk.start - 1) : QLatin1Char(' ');
+                const QChar after = tk.start + tk.length < line.length() ? line.at(tk.start + tk.length)
+                                                                        : QLatin1Char(' ');
+                const bool isConnector = before == QLatin1Char('-') || after == QLatin1Char('-')
+                        || before == QLatin1Char('|') || after == QLatin1Char('|');
+                if (isConnector)
+                    elem.format = mFormatList["pictureOperation"];
+                else
+                    elem.format = insidePictureParens(line, tk.start) ? mFormatList["pictureCoordinate"]
+                                                                     : mFormatList["pictureError"];
+                newRanges.append(elem);
+            } else if (tk.type == Token::number || tk.type == Token::openBracket || tk.type == Token::closeBracket
+                       || tk.type == Token::bracket
+                       || ((tk.type == Token::punctuation || tk.type == Token::symbol)
+                           && (tokenText == "." || tokenText == ","
+                               || tokenText == ":" || tokenText == "+"))) {
+                // bare coordinates/path data outside options. ":" separates angle and radius of a polar
+                // coordinate "(30:1cm)", "+" introduces a relative one "+(0,-0.5)"
+                elem.format = mFormatList["pictureCoordinate"];
+                newRanges.append(elem);
+            } else if (tk.type == Token::word) {
+                // bare path-operation keywords (grid, circle, arc, rectangle, cycle, ...): they get their
+                // own color, distinct from the \commands. These aren't declared anywhere in the .cwl
+                // completion data (unlike commands and keys), so there's no authoritative list to
+                // validate against; this is a hand-curated set of the core pgf/tikz path-construction
+                // operators from the pgfmanual.
+                static const QSet<QString> pgfPathOperations = {
+                    "grid", "circle", "ellipse", "rectangle", "arc", "parabola", "sin", "cos",
+                    "svg", "plot", "to", "cycle", "node", "coordinate", "pic", "controls", "and", "at"
+                };
+                // standard TeX length units: a bare dimension like "3mm" in an untokenized coordinate
+                // (e.g. "(3mm,0mm)") splits into a number token plus this word; color it like the number
+                static const QSet<QString> texUnits = {
+                    "pt", "pc", "in", "bp", "cm", "mm", "dd", "cc", "sp", "em", "ex"
+                };
+                if (texUnits.contains(tokenText)) {
+                    elem.format = mFormatList["pictureCoordinate"];
+                } else if (pgfPathOperations.contains(tokenText)) {
+                    elem.format = mFormatList["pictureOperation"];
+                } else {
+                    elem.format = mFormatList["pictureError"];
+                }
+                newRanges.append(elem);
+            } else if (tk.type == Token::punctuation || tk.type == Token::symbol) {
+                elem.format = mFormatList["pictureHighlight"];
+                newRanges.append(elem);
+            }
+        }
         // force text != math when text command is used, i.e. \textbf in math env, see #2603
         if(tk.subtype==Token::text){
             if(tk.type==Token::braces||tk.type==Token::openBrace){
@@ -961,6 +1562,10 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
                 elem.type = ERR_highlight;
                 elem.format=mFormatList["&math"];
                 elem.range = QPair<int, int>(tk.start, tk.length);
+                // inside a picture environment, make a math environment which is left open stand out:
+                // the opening "$" keeps the error color until the "$" closing it has been typed
+                if (pictureEnvIndex(activeEnv) >= 0 && mathDelimiterLeftOpen(word, tl, i, line))
+                    elem.format = mFormatList["pictureError"];
                 newRanges.append(elem);
                 QParenthesis p(61,17,tk.start,tk.length);
                 m_parens.append(p);
@@ -1232,6 +1837,10 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
                 elem.type = ERR_highlight;
                 elem.format=mFormatList["&math"];
                 elem.range = QPair<int, int>(tk.start, tk.length);
+                // inside a picture environment, make a math environment which is left open stand out:
+                // the opening "$" keeps the error color until the "$" closing it has been typed
+                if (pictureEnvIndex(activeEnv) >= 0 && mathDelimiterLeftOpen(word, tl, i, line))
+                    elem.format = mFormatList["pictureError"];
                 newRanges.append(elem);
                 QParenthesis p(61,17,tk.start,tk.length);
                 m_parens.append(p);
@@ -1424,66 +2033,12 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
 		}
 		if (tk.type == Token::keyVal_key) {
 			// special treatment for key val checking
-			QString command = tk.optionalCommandName;
-			QString value = line.mid(tk.start, tk.length);
-
-			// search stored keyvals
-			QString elem;
-            foreach(elem, ltxCommands->possibleCommands.keys()) {
-				if (elem.startsWith("key%") && elem.mid(4) == command)
-					break;
-				if (elem.startsWith("key%") && elem.mid(4, command.length()) == command && elem.mid(4 + command.length(), 1) == "/" && !elem.endsWith("#c")) {
-					// special treatment for distinguishing \command[keyvals]{test} where argument needs to equal test (used in yathesis.cwl)
-					// now find mandatory argument
-					QString subcommand;
-					for (int k = i + 1; k < tl.length(); k++) {
-						Token tk_elem = tl.at(k);
-						if (tk_elem.level > tk.level)
-							continue;
-						if (tk_elem.level < tk.level)
-							break;
-						if (tk_elem.type == Token::braces) {
-							subcommand = line.mid(tk_elem.start + 1, tk_elem.length - 2);
-							if (elem == "key%" + command + "/" + subcommand) {
-								break;
-							} else {
-								subcommand.clear();
-							}
-						}
-					}
-					if (!subcommand.isEmpty())
-						elem = "key%" + command + "/" + subcommand;
-					else
-						elem.clear();
-					break;
-				}
-				elem.clear();
-			}
-			if (!elem.isEmpty()) {
-				QStringList lst = ltxCommands->possibleCommands[elem].values();
-				QStringList::iterator iterator;
-				QStringList toAppend;
-				for (iterator = lst.begin(); iterator != lst.end(); ++iterator) {
-					int i = iterator->indexOf("#");
-					if (i > -1)
-						*iterator = iterator->left(i);
-
-					i = iterator->indexOf("=");
-					if (i > -1) {
-						*iterator = iterator->left(i);
-					}
-					if (iterator->startsWith("%")) {
-						toAppend << ltxCommands->possibleCommands[*iterator].values();
-					}
-				}
-				lst << toAppend;
-				if (!lst.contains(value)) {
-					Error elem;
-					elem.range = QPair<int, int>(tk.start, tk.length);
-					elem.type = ERR_unrecognizedKey;
-					newRanges.append(elem);
-				}
-			}
+            if (!checkKeyValKey(tk.optionalCommandName, tl, i, line)) {
+                Error elem;
+                elem.range = QPair<int, int>(tk.start, tk.length);
+                elem.type = ERR_unrecognizedKey;
+                newRanges.append(elem);
+            }
 		}
 		if (tk.subtype == Token::keyVal_val) {
 			//figure out keyval
@@ -1596,6 +2151,41 @@ void SyntaxCheck::checkLine(const QString &line, Ranges &newRanges, StackEnviron
 			}
 		}
 	}
+
+    // the scope-ending token was the last one on the line, so the pop at the top of the loop never ran
+    if (tikzScopeEnded && !activeEnv.isEmpty() && activeEnv.top().origName == "\\tikz")
+        activeEnv.pop();
+
+    // the gap scan above only runs when another token follows, so the tail of the line is still
+    // unpainted: without this the closing paren of a trailing coordinate like "(7,7)" stays uncolored
+    if (pictureLastEnd >= 0 && pictureEnvIndex(activeEnv) >= 0)
+        highlightPictureGap(line, pictureLastEnd, commentStart >= 0 ? commentStart : line.length(),
+                            pictureBracketEnd, newRanges);
+
+    {
+        const int pictureEnv = pictureEnvIndex(activeEnv);
+        if (pictureEnv >= 0 && activeEnv.at(pictureEnv).pictureStatementOpen) {
+            const Environment &env = activeEnv.at(pictureEnv);
+            // getCookieLocked() rather than hasCookie(): the latter expects the caller to hold the lock
+            if (env.pictureStatementDlh == dlh && dlh
+                    && dlh->getCookieLocked(QDocumentLine::UNTERMINATED_STATEMENT_COOKIE).isValid()) {
+                // this line was found to be missing its ";" on an earlier pass, while a later line was
+                // being checked. That line is not rechecked when this one is edited, so restore the
+                // shading from the verdict stored on the line itself.
+                const int end = commentStart >= 0 ? commentStart : line.length();
+                if (end > env.pictureStatementColumn) {
+                    Error elem;
+                    elem.type = ERR_highlight;
+                    elem.format = mFormatList["pictureUnterminated"];
+                    elem.range = QPair<int, int>(env.pictureStatementColumn, end - env.pictureStatementColumn);
+                    newRanges.prepend(elem); // background first, the token colors are drawn on top
+                }
+            }
+            // No clearing here on purpose. A line which merely continues the statement proves nothing:
+            // dropping the shading at that point loses it for good, because the line carrying the evidence
+            // further down is not necessarily rechecked afterwards. Only a ";" clears it (see below).
+        }
+    }
 
     if(!activeEnv.isEmpty()){
         //check active env for env highlighting (math,verbatim)

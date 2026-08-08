@@ -29,14 +29,30 @@ public:
     int endingColumn;
 	int ticket;
     int level; ///< command level (see tokens) in order to handle nested commands like \shortstack
+    QString pictureCommand; ///< most recent \draw-like command seen inside a picture env. Used to validate keys
+                            ///< in brackets that follow a bare word (e.g. "arc [start angle=...]"), which may sit
+                            ///< on a later line than their command. Deliberately not part of operator==, so that
+                            ///< merely changing it does not force a recheck of every following line.
+    bool pictureStatementOpen = false; ///< a path command (\draw, \node, ...) has been started inside a picture env
+                                       ///< and its closing ";" is still missing. Part of operator==, so that the
+                                       ///< following lines get rechecked when it changes: they are shaded too.
+    int pictureStatementLevel = 0; ///< command level of that path command, so that a ";" nested deeper (inside the
+                                   ///< text of a node, say) is not mistaken for the one terminating it
+    QDocumentLineHandle *pictureStatementDlh = nullptr; ///< line the path command sits on. Whether its ";" was
+                                   ///< forgotten only becomes apparent on a later line, so the shading has to be
+                                   ///< applied to (or removed from) that line afterwards
+    int pictureStatementTicket = 0; ///< ticket of that line, to leave it alone once it has been edited again
+    int pictureStatementColumn = 0; ///< column the path command starts at
+    bool pictureUntilSemicolon = false; ///< picture scope opened by "\tikz" without braces: it ends at the first ";"
 
 	bool operator ==(const Environment &env) const
 	{
-        return (name == env.name) && (id == env.id) && (excessCol == env.excessCol) && (origName == env.origName) && (level == env.level);
+        return (name == env.name) && (id == env.id) && (excessCol == env.excessCol) && (origName == env.origName) && (level == env.level)
+                && (pictureStatementOpen == env.pictureStatementOpen) && (pictureUntilSemicolon == env.pictureUntilSemicolon);
 	}
 	bool operator !=(const Environment &env) const
 	{
-        return (name != env.name) || (id != env.id) || (excessCol != env.excessCol) || (origName != env.origName) || (level != env.level);
+        return !(*this == env);
 	}
 };
 
@@ -111,6 +127,14 @@ public:
     bool checkMathEnvActive(const StackEnvironment &envs);
 	int topEnv(const QString &name, const StackEnvironment &envs, const int id = -1);
 	bool checkCommand(const QString &cmd, const StackEnvironment &envs);
+    bool checkKeyValKey(const QString &command, const TokenList &tl, int i, const QString &line, const QString &keyOverride = QString());
+    int pictureEnvIndex(const StackEnvironment &envs);
+    void highlightPictureGap(const QString &line, int from, int to, int &pictureBracketEnd, Ranges &newRanges);
+    void highlightPictureBracket(const QString &line, int from, int to, Ranges &newRanges);
+    bool insidePictureParens(const QString &line, int pos);
+    bool mathDelimiterLeftOpen(const QString &startWord, const TokenList &tl, int i, const QString &line);
+    void markUnterminatedStatement(const Environment &env, Ranges &newRanges, QDocumentLineHandle *dlh, const QString &line, int commentStart);
+    void clearUnterminatedStatement(const Environment &env, QDocumentLineHandle *dlh);
 	static bool equalEnvStack(StackEnvironment env1, StackEnvironment env2);
 
     void setLtxCommands(QSharedPointer<LatexParser> cmds);
